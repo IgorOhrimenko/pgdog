@@ -33,7 +33,7 @@ pub use aggregate::{Aggregate, AggregateFunction, AggregateTarget};
 pub use binary::BinaryStream;
 pub use cache::{Ast, AstContext, AstQuery, Cache};
 pub(crate) use column::Column;
-pub use command::{Command, SetParam};
+pub use command::{Command, SetParam, SetResponse};
 pub(crate) use comment::parse_edge_comment;
 pub use context::QueryParserContext;
 pub use copy::{CopyFormat, CopyParser};

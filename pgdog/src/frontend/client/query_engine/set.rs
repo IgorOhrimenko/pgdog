@@ -1,5 +1,6 @@
 use crate::frontend::SetParam;
 use crate::frontend::router::parameter_hints::{PGDOG_PIN, PGDOG_SHARD, PGDOG_SHARDING_KEY};
+use crate::frontend::router::parser::SetResponse;
 use crate::net::messages::ErrorResponse;
 
 use super::*;
@@ -15,7 +16,7 @@ impl QueryEngine {
         &mut self,
         context: &mut QueryEngineContext<'_>,
         params: &[SetParam],
-        behave_like_select: bool,
+        response: SetResponse,
     ) -> Result<(), Error> {
         // Make sure client isn't changing route mid-transaction.
         if self.route_change_check(context, params).await? {
@@ -55,11 +56,13 @@ impl QueryEngine {
             self.comms.update_params(context.params);
         }
 
-        if self.backend.connected() {
+        // Forwarded statements carry commands besides SET, so only a server
+        // can answer them.
+        if self.backend.connected() || response == SetResponse::Forward {
             self.execute(context).await?;
         } else {
-            let values_to_return =
-                behave_like_select.then(|| params.iter().map(|p| p.value.as_ref()));
+            let values_to_return = (response == SetResponse::FakeSelect)
+                .then(|| params.iter().map(|p| p.value.as_ref()));
             self.fake_command_response(context, fake_command, values_to_return)
                 .await?;
         }

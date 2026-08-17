@@ -3,7 +3,7 @@ use crate::{
     frontend::{
         Command,
         router::parser::{
-            Shard,
+            SetResponse, Shard,
             route::{OverrideReason, ShardSource},
         },
     },
@@ -29,16 +29,21 @@ fn test_mixed_set_passthrough_in_session_mode() {
 }
 
 #[test]
-fn test_mixed_set_rejected_in_transaction_mode() {
+fn test_mixed_set_captures_params_in_transaction_mode() {
     let mut test = QueryParserTest::new();
 
-    let result = test.try_execute(vec![
+    let command = test.execute(vec![
         Query::new("SET DateStyle='ISO'; show transaction_isolation").into(),
     ]);
-    assert!(
-        result.is_err(),
-        "expected error for mixed SET in transaction mode, got {result:#?}",
-    );
+
+    match command {
+        Command::Set { ref params, .. } => {
+            assert_eq!(params.len(), 1);
+            assert_eq!(params[0].name, "datestyle");
+            assert_eq!(params[0].value, Some(ParameterValue::String("ISO".into())));
+        }
+        _ => panic!("expected Command::Set, got {command:#?}"),
+    }
 }
 
 #[test]
@@ -66,15 +71,13 @@ fn test_set_config_null_value() {
 
     match command {
         Command::Set {
-            params,
-            behave_like_select,
-            ..
+            params, response, ..
         } => {
             assert_eq!(params.len(), 1);
             assert_eq!(params[0].name, "lock_timeout");
             assert_eq!(params[0].value, None);
             assert!(!params[0].local);
-            assert!(behave_like_select);
+            assert_eq!(response, SetResponse::FakeSelect);
         }
         _ => panic!("expected Command::Set, got {command:#?}"),
     }
@@ -121,13 +124,64 @@ fn test_set_multi_statement_mixed_local() {
 }
 
 #[test]
-fn test_set_multi_statement_mixed_returns_error() {
+fn test_set_multi_statement_mixed_captures_set_params() {
     let mut test = QueryParserTest::new();
 
-    let result = test.try_execute(vec![
+    let command = test.execute(vec![
         Query::new("SET statement_timeout TO 1; SELECT 1").into(),
     ]);
-    assert!(result.is_err());
+
+    match command {
+        Command::Set { ref params, .. } => {
+            assert_eq!(params.len(), 1);
+            assert_eq!(params[0].name, "statement_timeout");
+            assert_eq!(params[0].value, Some(ParameterValue::String("1".into())));
+        }
+        _ => panic!("expected Command::Set, got {command:#?}"),
+    }
+}
+
+#[test]
+fn test_set_multi_statement_mixed_captures_params_after_other_command() {
+    let mut test = QueryParserTest::new();
+
+    let command = test.execute(vec![
+        Query::new("SELECT 1; SET statement_timeout TO 1; SELECT 2; SET work_mem TO '64MB'").into(),
+    ]);
+
+    match command {
+        Command::Set { ref params, .. } => {
+            assert_eq!(params.len(), 2);
+            assert_eq!(params[0].name, "statement_timeout");
+            assert_eq!(params[1].name, "work_mem");
+        }
+        _ => panic!("expected Command::Set, got {command:#?}"),
+    }
+}
+
+#[test]
+fn test_pgadmin_startup_batch_captures_params() {
+    let mut test = QueryParserTest::new();
+
+    // The batch pgAdmin 4 sends on every connection, as a single simple query.
+    let command = test.execute(vec![
+        Query::new(
+            "SET DateStyle=ISO; SET client_min_messages=notice; \
+             SELECT set_config('bytea_output','hex',false) FROM pg_show_all_settings() \
+             WHERE name = 'bytea_output'; SET client_encoding='utf-8';",
+        )
+        .into(),
+    ]);
+
+    match command {
+        Command::Set { ref params, .. } => {
+            let names = params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>();
+            assert!(names.contains(&"datestyle"), "got {names:?}");
+            assert!(names.contains(&"client_min_messages"), "got {names:?}");
+            assert!(names.contains(&"client_encoding"), "got {names:?}");
+        }
+        _ => panic!("expected Command::Set, got {command:#?}"),
+    }
 }
 
 #[test]
@@ -250,5 +304,65 @@ fn test_single_shard_set() {
     match command {
         Command::Set { route, .. } => assert!(!route.is_cross_shard()),
         _ => panic!("not a set"),
+    }
+}
+
+#[test]
+fn test_mixed_set_is_forwarded_to_server() {
+    let mut test = QueryParserTest::new();
+
+    let command = test.execute(vec![
+        Query::new("SET statement_timeout TO 1; SELECT 1").into(),
+    ]);
+
+    match command {
+        Command::Set { response, .. } => assert_eq!(response, SetResponse::Forward),
+        _ => panic!("expected Command::Set, got {command:#?}"),
+    }
+}
+
+#[test]
+fn test_all_set_multi_statement_is_not_forwarded() {
+    let mut test = QueryParserTest::new();
+
+    let command = test.execute(vec![
+        Query::new("SET statement_timeout TO 1; SET work_mem TO '64MB'").into(),
+    ]);
+
+    match command {
+        Command::Set { response, .. } => assert_eq!(response, SetResponse::Fake),
+        _ => panic!("expected Command::Set, got {command:#?}"),
+    }
+}
+
+#[test]
+fn test_multi_statement_set_config_is_captured() {
+    let mut test = QueryParserTest::new();
+
+    // pgAdmin sets bytea_output through set_config(). Untracked, it would stay
+    // on the server connection and leak into the next client.
+    let command = test.execute(vec![
+        Query::new(
+            "SET DateStyle=ISO; \
+             SELECT set_config('bytea_output','hex',false) FROM pg_show_all_settings() \
+             WHERE name = 'bytea_output'",
+        )
+        .into(),
+    ]);
+
+    match command {
+        Command::Set {
+            ref params,
+            response,
+            ..
+        } => {
+            let bytea = params
+                .iter()
+                .find(|p| p.name == "bytea_output")
+                .expect("bytea_output should be tracked");
+            assert_eq!(bytea.value, Some(ParameterValue::String("hex".into())));
+            assert_eq!(response, SetResponse::Forward);
+        }
+        _ => panic!("expected Command::Set, got {command:#?}"),
     }
 }

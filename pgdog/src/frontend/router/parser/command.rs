@@ -12,6 +12,18 @@ pub struct SetParam {
     pub local: bool,
 }
 
+/// How the client learns that its `SET` was applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetResponse {
+    /// PgDog answers with a `SET`/`RESET` completion of its own. The statement
+    /// only reaches a server if one is already checked out.
+    Fake,
+    /// PgDog answers with the new value, the way `SELECT set_config(...)` does.
+    FakeSelect,
+    /// The statement carries commands besides `SET`, so a server has to run it.
+    Forward,
+}
+
 #[derive(Debug, Clone)]
 pub enum Command {
     Query(Route),
@@ -32,7 +44,7 @@ pub enum Command {
     Set {
         params: Vec<SetParam>,
         route: Route,
-        behave_like_select: bool,
+        response: SetResponse,
     },
     ResetAll,
     InternalField {

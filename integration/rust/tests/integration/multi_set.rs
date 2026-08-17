@@ -46,17 +46,15 @@ async fn test_multi_set_with_timezone_interval() {
 }
 
 #[tokio::test]
-async fn test_multi_set_mixed_returns_error() {
+async fn test_multi_set_mixed_executes_on_server() {
     for conn in connections_tokio().await {
-        let err = conn
-            .batch_execute("SET statement_timeout TO '10s'; SELECT 1")
+        let msgs = conn
+            .simple_query("SET statement_timeout TO '10s'; SELECT 1")
             .await
-            .unwrap_err();
-        let db_err = err.as_db_error().expect("Expected a DbError");
-        let msg = db_err.message();
-        assert!(
-            msg.contains("multi-statement queries cannot mix SET with other commands"),
-            "unexpected error: {msg}",
-        );
+            .unwrap();
+        assert_eq!(extract_simple_query_value(&msgs), "1");
+
+        let rows = conn.simple_query("SHOW statement_timeout").await.unwrap();
+        assert_eq!(extract_simple_query_value(&rows), "10s");
     }
 }

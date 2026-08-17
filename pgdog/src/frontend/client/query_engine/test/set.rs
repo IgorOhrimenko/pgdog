@@ -1,8 +1,11 @@
 use crate::{
     backend::databases::reload_from_existing,
-    config::{config, load_test_sharded, set},
+    config::{config, load_test, load_test_sharded, set},
     expect_message,
-    net::{CommandComplete, ErrorResponse, ReadyForQuery, parameter::ParameterValue},
+    net::{
+        CommandComplete, DataRow, ErrorResponse, ReadyForQuery, RowDescription,
+        parameter::ParameterValue,
+    },
 };
 
 use super::prelude::*;
@@ -730,4 +733,62 @@ async fn test_lock_timeout() {
         test_client.client().params.get("lock_timeout").is_none(),
         "lock_timeout should be cleared after RESET"
     );
+}
+
+#[tokio::test]
+async fn test_mixed_set_batch_executes_on_server() {
+    load_test();
+    let mut test_client = TestClient::new(Parameters::default()).await;
+
+    // The batch mixes SET with another command, like pgAdmin does on connect.
+    // Everything in it has to be executed by the server, not answered by PgDog.
+    test_client
+        .send_simple(Query::new("SET statement_timeout TO '3s'; SELECT 1"))
+        .await;
+
+    assert_eq!(
+        expect_message!(test_client.read().await, CommandComplete).command(),
+        "SET"
+    );
+    expect_message!(test_client.read().await, RowDescription);
+    let row = expect_message!(test_client.read().await, DataRow);
+    assert_eq!(
+        row.get_int(0, true),
+        Some(1),
+        "the SELECT in the batch must be executed by the server"
+    );
+    assert_eq!(
+        expect_message!(test_client.read().await, CommandComplete).command(),
+        "SELECT 1"
+    );
+    assert_eq!(
+        expect_message!(test_client.read().await, ReadyForQuery).status,
+        'I'
+    );
+}
+
+#[tokio::test]
+async fn test_mixed_set_batch_params_tracked_across_checkouts() {
+    load_test();
+    let mut test_client = TestClient::new(Parameters::default()).await;
+
+    test_client
+        .send_simple(Query::new("SET statement_timeout TO '3s'; SELECT 1"))
+        .await;
+    test_client.read_until('Z').await.unwrap();
+
+    assert_eq!(
+        test_client.client().params.get("statement_timeout"),
+        Some(&ParameterValue::String("3s".into())),
+        "SET inside a mixed batch must be tracked, or it leaks into the next client"
+    );
+
+    // The parameter is re-applied on the next checkout instead of being lost.
+    test_client
+        .send_simple(Query::new("SHOW statement_timeout"))
+        .await;
+    expect_message!(test_client.read().await, RowDescription);
+    let row = expect_message!(test_client.read().await, DataRow);
+    assert_eq!(row.get_text(0).as_deref(), Some("3s"));
+    test_client.read_until('Z').await.unwrap();
 }

@@ -1,6 +1,8 @@
 use super::*;
 use pg_raw_parse::{Node, nodes, nodes::VariableSetKind::*};
 
+use super::set_config::set_config_param;
+
 impl QueryParser {
     /// Handle the SET command.
     ///
@@ -27,7 +29,7 @@ impl QueryParser {
             Ok(Command::Set {
                 params: vec![param],
                 route: Route::write(context.shards_calculator.shard()),
-                behave_like_select: false,
+                response: SetResponse::Fake,
             })
         }
     }
@@ -58,9 +60,12 @@ impl QueryParser {
 
     /// Try to handle multi-statement queries containing SET commands.
     ///
-    /// - All SETs → returns `Ok(Some(Command::Set { .. }))`
+    /// - All SETs → returns `Ok(Some(Command::Set { .. }))`, answered by PgDog
     /// - No SETs → returns `Ok(None)`, caller falls through to default parsing
-    /// - Mix of SET + non-SET → returns `Err(MultiStatementMixedSet)`
+    /// - Mix of SET + non-SET → returns `Ok(Some(Command::Set { .. }))` with
+    ///   [`SetResponse::Forward`]: the batch runs on a server as one implicit
+    ///   transaction, while PgDog still tracks the parameters it sets, so they
+    ///   don't leak into the next client using that connection.
     ///
     /// In session mode, returns `Ok(Some(Command::Query(..)))` immediately so that
     /// all multi-statement queries are forwarded to the server verbatim.
@@ -84,6 +89,12 @@ impl QueryParser {
                 Node::VariableSetStmt(stmt) if stmt.kind != VAR_SET_MULTI => {
                     Some(Self::parse_set_param(stmt))
                 }
+                // set_config() changes a parameter like SET does, but it also
+                // returns rows, so the server still has to run the statement.
+                Node::SelectStmt(stmt) if let Some(param) = set_config_param(stmt) => {
+                    has_other = true;
+                    Some(Ok(param))
+                }
                 _ => {
                     has_other = true;
                     None
@@ -93,13 +104,15 @@ impl QueryParser {
 
         if params.is_empty() {
             Ok(None)
-        } else if has_other {
-            Err(Error::MultiStatementMixedSet)
         } else {
             Ok(Some(Command::Set {
                 params,
                 route: Route::write(context.shards_calculator.shard()),
-                behave_like_select: false,
+                response: if has_other {
+                    SetResponse::Forward
+                } else {
+                    SetResponse::Fake
+                },
             }))
         }
     }

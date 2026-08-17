@@ -14,7 +14,7 @@ impl QueryParser {
             Command::Set {
                 params: vec![param],
                 route: Route::write(context.shards_calculator.shard()),
-                behave_like_select: true,
+                response: SetResponse::FakeSelect,
             }
         } else {
             Command::Query(
@@ -22,6 +22,11 @@ impl QueryParser {
             )
         }
     }
+}
+
+/// The parameter a `SELECT set_config(...)` statement sets, if we can read it.
+pub(super) fn set_config_param(stmt: &nodes::SelectStmt) -> Option<SetParam> {
+    parse_args(extract_set_config(stmt)?)
 }
 
 /// Returns None if the arguments could not be parsed
